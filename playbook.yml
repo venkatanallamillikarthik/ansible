@@ -4,7 +4,8 @@
                
   vars:
     XXBDA_TOP: "XXBDA"          
-    rdf_local: "~/rdf-deploy/demo.rdf"     
+    #rdf_local: "~/rdf-deploy/demo.rdf"     
+    rdf_api_url: "https://raw.githubusercontent.com/venkatanallamillikarthik/ansible/refs/heads/main/demo.rdf"
 
     target_name: "ccc.rdf"
     tempfile_name: "{{ rdf_local | basename }}"   
@@ -40,10 +41,18 @@
         state: directory
         mode: "0777"
 
+    - name: Download RDF from API
+      uri:
+        url: "{{ rdf_api_url }}"
+        method: GET
+        return_content: yes
+      register: rdf_file
+
     # (5) Copy the local RDF into /tmp/DATE  
     - name: Upload RDF file to /tmp/DATE
       copy:
-        src: "{{ rdf_local }}"
+        #src: "{{ rdf_local }}"
+        content: "{{ rdf_file.content }}"
         dest: "{{ remote_tmp_dir }}/{{ tempfile_name }}"
         mode: "0644"
 
