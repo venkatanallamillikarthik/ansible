@@ -1,0 +1,74 @@
+---
+- hosts: app
+  gather_facts: true         # to get ansible_date_time for today's date
+               
+  vars:
+    XXBDA_TOP: "XXBDA"          
+    rdf_local: "~/rdf-deploy/demo.rdf"     
+
+    target_name: "ccc.rdf"
+    tempfile_name: "{{ rdf_local | basename }}"   
+
+    # Date tags (examples: 04MAR25 / 04-mar-25)
+    tmp_tag: "{{ '%d%b%y' | strftime(ansible_date_time.epoch | int) | upper }}"
+    backup_tag: "{{ '%d-%b-%y' | strftime(ansible_date_time.epoch | int) | lower }}"
+
+  tasks:
+
+    - name: Compute base paths
+      set_fact:
+        reports_dir: "{{ XXBDA_TOP }}/reports/US"
+        remote_tmp_dir: "/tmp/{{ tmp_tag }}"
+
+    - name: Compute target and backup paths
+      set_fact:
+        remote_target: "{{ reports_dir }}/{{ target_name }}"
+        backup_file: "{{ reports_dir }}/{{ target_name | splitext | first }}.{{ backup_tag }}.rdf"
+
+
+    # (2) Backup of existing RDF with today's date (we'll move after ensuring dest exists)
+    - name: Ensure destination folder exists
+      file:
+        path: "{{ reports_dir }}"
+        state: directory
+        mode: "0775"
+
+    # (4) Create /tmp/DATE with full permissions (777)
+    - name: Ensure tmp dir exists with 0777
+      file:
+        path: "{{ remote_tmp_dir }}"
+        state: directory
+        mode: "0777"
+
+    # (5) Copy the local RDF into /tmp/DATE  
+    - name: Upload RDF file to /tmp/DATE
+      copy:
+        src: "{{ rdf_local }}"
+        dest: "{{ remote_tmp_dir }}/{{ tempfile_name }}"
+        mode: "0644"
+
+    # (2) Backup existing target (if exists) with today's date
+    - name: Backup existing target (if it exists)
+      command: "mv -f {{ remote_target }} {{ backup_file }}"
+      register: backup_mv
+      failed_when: false
+      changed_when: backup_mv.rc == 0
+
+    # (6) Copy from /tmp/DATE to $XXBDA_TOP/reports/US
+    - name: Deploy new RDF to target location
+      copy:
+        src: "{{ remote_tmp_dir }}/{{ tempfile_name  }}"
+        dest: "{{ remote_target }}"
+        remote_src: true
+        mode: "0664"
+        force: true
+
+    - name: SUCCESS summary
+      debug:
+        msg:
+          - "Deployed: {{ remote_target }}"
+          - "Backup:  {{ (backup_mv.rc == 0) | ternary(backup_file, 'No previous file found') }}"
+          - "Source:  {{ remote_tmp_dir }}/{{ tempfile_name}}"
+
+
+
