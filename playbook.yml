@@ -8,7 +8,7 @@
     rdf_api_url: "https://raw.githubusercontent.com/venkatanallamillikarthik/ansible/refs/heads/main/demo.rdf"
 
     target_name: "ccc.rdf"
-    tempfile_name: "{{ rdf_local | basename }}"   
+    tempfile_name: "{{ rdf_api_url | basename }}"   
 
     # Date tags (examples: 04MAR25 / 04-mar-25)
     tmp_tag: "{{ '%d%b%y' | strftime(ansible_date_time.epoch | int) | upper }}"
