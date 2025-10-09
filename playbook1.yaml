@@ -1,0 +1,86 @@
+---
+- hosts: app
+  gather_facts: true         # to get ansible_date_time for today's date
+               
+  vars:
+    XXBDA_TOP: "XXBDA"          
+    # DigitalVue API configuration - attachment_id comes from AWX Survey
+    digitalvue_base_url: "https://digitalvuetest.osidigital.com"
+    digitalvue_api_url: "{{ digitalvue_base_url }}/api/v1/attachments/{{ attachment_id }}/download/"
+    target_name: "ccc.rdf"
+    tempfile_name: "attachment_{{ attachment_id }}.rdf"   
+    # Date tags (examples: 04MAR25 / 04-mar-25)
+    tmp_tag: "{{ '%d%b%y' | strftime(ansible_date_time.epoch | int) | upper }}"
+    backup_tag: "{{ '%d-%b-%y' | strftime(ansible_date_time.epoch | int) | lower }}"
+  tasks:
+    - name: Compute base paths
+      set_fact:
+        reports_dir: "{{ XXBDA_TOP }}/reports/US"
+        remote_tmp_dir: "/tmp/{{ tmp_tag }}"
+    - name: Compute target and backup paths
+      set_fact:
+        remote_target: "{{ reports_dir }}/{{ target_name }}"
+        backup_file: "{{ reports_dir }}/{{ target_name | splitext | first }}.{{ backup_tag }}.rdf"
+    # (2) Backup of existing RDF with today's date (we'll move after ensuring dest exists)
+    - name: Ensure destination folder exists
+      file:
+        path: "{{ reports_dir }}"
+        state: directory
+        mode: "0775"
+    # (4) Create /tmp/DATE with full permissions (777)
+    - name: Ensure tmp dir exists with 0777
+      file:
+        path: "{{ remote_tmp_dir }}"
+        state: directory
+        mode: "0777"
+    
+    # Step 1: Get download URL from DigitalVue API
+    - name: Get download URL from DigitalVue API
+      uri:
+        url: "{{ digitalvue_api_url }}"
+        method: GET
+        return_content: yes
+        headers:
+          Accept: "application/json"
+      register: digitalvue_response
+    
+    # Parse the download URL from response
+    - name: Parse download URL
+      set_fact:
+        download_url: "{{ (digitalvue_response.content | from_json).download_url }}"
+    
+    # Step 2: Download RDF from S3 URL
+    - name: Download RDF from S3 URL
+      uri:
+        url: "{{ download_url }}"
+        method: GET
+        return_content: yes
+        follow_redirects: all
+      register: rdf_file
+    
+    # (5) Copy the local RDF into /tmp/DATE  
+    - name: Upload RDF file to /tmp/DATE
+      copy:
+        content: "{{ rdf_file.content }}"
+        dest: "{{ remote_tmp_dir }}/{{ tempfile_name }}"
+        mode: "0644"
+    # (2) Backup existing target (if exists) with today's date
+    - name: Backup existing target (if it exists)
+      command: "mv -f {{ remote_target }} {{ backup_file }}"
+      register: backup_mv
+      failed_when: false
+      changed_when: backup_mv.rc == 0
+    # (6) Copy from /tmp/DATE to $XXBDA_TOP/reports/US
+    - name: Deploy new RDF to target location
+      copy:
+        src: "{{ remote_tmp_dir }}/{{ tempfile_name  }}"
+        dest: "{{ remote_target }}"
+        remote_src: true
+        mode: "0664"
+        force: true
+    - name: SUCCESS summary
+      debug:
+        msg:
+          - "Deployed: {{ remote_target }}"
+          - "Backup:  {{ (backup_mv.rc == 0) | ternary(backup_file, 'No previous file found') }}"
+          - "Source:  {{ remote_tmp_dir }}/{{ tempfile_name}}"
