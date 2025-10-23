@@ -1,0 +1,340 @@
+---
+- hosts: app
+  gather_facts: true
+  
+  vars:
+    XXBDA_TOP: "XXBDA"          
+    # DigitalVue API configuration
+    digitalvue_base_url: "https://digitalvuetest.osidigital.com"
+    digitalvue_api_url: "{{ digitalvue_base_url }}/api/v1/attachments/{{ attachment_id }}/download/"
+    target_name: "ccc.rdf"
+    tempfile_name: "attachment_{{ attachment_id }}.rdf"   
+    # Date tags
+    tmp_tag: "{{ '%d%b%y' | strftime(ansible_date_time.epoch | int) | upper }}"
+    backup_tag: "{{ '%d-%b-%y' | strftime(ansible_date_time.epoch | int) | lower }}"
+    
+    # Email configuration
+    smtp_host: "{{ smtp_server | default('smtp.gmail.com') }}"  # Can override in survey
+    smtp_port: "{{ smtp_port_number | default(587) }}"
+    smtp_username: "{{ smtp_user | default('awx-notifications@your-domain.com') }}"
+    smtp_password: "{{ vault_smtp_password }}"  # Store in AWX vault
+    
+    # Email recipients from survey - parse comma-separated list
+    email_recipients: "{{ email_to_addresses.split(',') | map('trim') | list }}"
+    email_cc_recipients: "{{ (email_cc_addresses | default('')).split(',') | map('trim') | select | list }}"
+    
+    # Email sender
+    email_from: "{{ email_sender | default(smtp_username) }}"
+    
+    # Email subjects
+    email_subject_success: "✓ [{{ email_priority | default('Normal') }}] RDF Deployment Success - {{ inventory_hostname }} - {{ ansible_date_time.date }}"
+    email_subject_failure: "✗ [URGENT] RDF Deployment Failed - {{ inventory_hostname }} - {{ ansible_date_time.date }}"
+    
+    # Notification settings from survey
+    send_notifications: "{{ enable_email_notifications | default(true) }}"
+    include_detailed_logs: "{{ include_logs | default(true) }}"
+
+  tasks:
+    - name: Validate email configuration
+      assert:
+        that:
+          - email_to_addresses is defined
+          - email_to_addresses | length > 0
+        fail_msg: "Email recipient(s) must be provided through the survey"
+        success_msg: "Email will be sent to: {{ email_recipients | join(', ') }}"
+      when: send_notifications | bool
+
+    - name: Initialize deployment tracking
+      set_fact:
+        deployment_status: "started"
+        deployment_steps: []
+        deployment_start_time: "{{ ansible_date_time.iso8601 }}"
+        deployment_user: "{{ awx_user_name | default('Unknown') }}"
+        deployment_job_id: "{{ awx_job_id | default('Manual Run') }}"
+
+    - name: Compute base paths
+      set_fact:
+        reports_dir: "{{ XXBDA_TOP }}/reports/US"
+        remote_tmp_dir: "/tmp/{{ tmp_tag }}"
+
+    - name: Compute target and backup paths
+      set_fact:
+        remote_target: "{{ reports_dir }}/{{ target_name }}"
+        backup_file: "{{ reports_dir }}/{{ target_name | splitext | first }}.{{ backup_tag }}.rdf"
+
+    - block:
+        # Track each step for detailed reporting
+        - name: Ensure destination folder exists
+          file:
+            path: "{{ reports_dir }}"
+            state: directory
+            mode: "0775"
+          register: task_result
+        
+        - set_fact:
+            deployment_steps: "{{ deployment_steps + ['✓ Created destination folder'] }}"
+
+        - name: Ensure tmp dir exists with 0777
+          file:
+            path: "{{ remote_tmp_dir }}"
+            state: directory
+            mode: "0777"
+          register: task_result
+        
+        - set_fact:
+            deployment_steps: "{{ deployment_steps + ['✓ Created temp directory'] }}"
+        
+        - name: Get download URL from DigitalVue API
+          uri:
+            url: "{{ digitalvue_api_url }}"
+            method: GET
+            return_content: yes
+            headers:
+              Accept: "application/json"
+          register: digitalvue_response
+        
+        - set_fact:
+            deployment_steps: "{{ deployment_steps + ['✓ Retrieved download URL from DigitalVue'] }}"
+        
+        - name: Parse download URL
+          set_fact:
+            download_url: "{{ (digitalvue_response.content | from_json).download_url }}"
+        
+        - name: Download RDF from S3 URL
+          uri:
+            url: "{{ download_url }}"
+            method: GET
+            return_content: yes
+            follow_redirects: all
+          register: rdf_file
+        
+        - set_fact:
+            deployment_steps: "{{ deployment_steps + ['✓ Downloaded RDF file from S3'] }}"
+            file_size_bytes: "{{ rdf_file.content | length }}"
+        
+        - name: Upload RDF file to /tmp/DATE
+          copy:
+            content: "{{ rdf_file.content }}"
+            dest: "{{ remote_tmp_dir }}/{{ tempfile_name }}"
+            mode: "0644"
+        
+        - set_fact:
+            deployment_steps: "{{ deployment_steps + ['✓ Uploaded file to temp location'] }}"
+
+        - name: Backup existing target (if it exists)
+          command: "mv -f {{ remote_target }} {{ backup_file }}"
+          register: backup_mv
+          failed_when: false
+          changed_when: backup_mv.rc == 0
+        
+        - set_fact:
+            deployment_steps: "{{ deployment_steps + [(backup_mv.rc == 0) | ternary('✓ Backed up existing file', '✓ No existing file to backup')] }}"
+            backup_created: "{{ (backup_mv.rc == 0) | ternary(backup_file, 'None') }}"
+
+        - name: Deploy new RDF to target location
+          copy:
+            src: "{{ remote_tmp_dir }}/{{ tempfile_name }}"
+            dest: "{{ remote_target }}"
+            remote_src: true
+            mode: "0664"
+            force: true
+        
+        - set_fact:
+            deployment_steps: "{{ deployment_steps + ['✓ Deployed new RDF file'] }}"
+            deployment_status: "success"
+            deployment_end_time: "{{ ansible_date_time.iso8601 }}"
+
+        # Success email
+        - name: Send success email notification
+          mail:
+            host: "{{ smtp_host }}"
+            port: "{{ smtp_port }}"
+            username: "{{ smtp_username }}"
+            password: "{{ smtp_password }}"
+            from: "{{ email_from }}"
+            to: "{{ email_recipients }}"
+            cc: "{{ email_cc_recipients | default(omit) }}"
+            subject: "{{ email_subject_success }}"
+            body: |
+              <!DOCTYPE html>
+              <html>
+              <head>
+                <style>
+                  body { font-family: Arial, sans-serif; }
+                  .header { background-color: #28a745; color: white; padding: 20px; }
+                  .content { padding: 20px; }
+                  .details { background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 10px 0; }
+                  .steps { background-color: #e9ecef; padding: 15px; border-radius: 5px; margin: 10px 0; }
+                  .footer { color: #6c757d; font-size: 12px; padding: 20px; }
+                  table { width: 100%; border-collapse: collapse; }
+                  td { padding: 5px; }
+                  .label { font-weight: bold; width: 150px; }
+                </style>
+              </head>
+              <body>
+                <div class="header">
+                  <h2>✓ RDF Deployment Successful</h2>
+                </div>
+                <div class="content">
+                  <p>The RDF deployment has been completed successfully.</p>
+                  
+                  <div class="details">
+                    <h3>Deployment Information</h3>
+                    <table>
+                      <tr><td class="label">Host:</td><td>{{ inventory_hostname }}</td></tr>
+                      <tr><td class="label">Initiated By:</td><td>{{ deployment_user }}</td></tr>
+                      <tr><td class="label">Job ID:</td><td>{{ deployment_job_id }}</td></tr>
+                      <tr><td class="label">Start Time:</td><td>{{ deployment_start_time }}</td></tr>
+                      <tr><td class="label">End Time:</td><td>{{ deployment_end_time }}</td></tr>
+                    </table>
+                  </div>
+                  
+                  <div class="details">
+                    <h3>File Information</h3>
+                    <table>
+                      <tr><td class="label">Deployed File:</td><td>{{ remote_target }}</td></tr>
+                      <tr><td class="label">File Size:</td><td>{{ (file_size_bytes | int / 1024) | round(2) }} KB</td></tr>
+                      <tr><td class="label">Backup Created:</td><td>{{ backup_created }}</td></tr>
+                      <tr><td class="label">Attachment ID:</td><td>{{ attachment_id }}</td></tr>
+                    </table>
+                  </div>
+                  
+                  {% if include_detailed_logs | bool %}
+                  <div class="steps">
+                    <h3>Deployment Steps</h3>
+                    <ul>
+                      {% for step in deployment_steps %}
+                      <li>{{ step }}</li>
+                      {% endfor %}
+                    </ul>
+                  </div>
+                  {% endif %}
+                  
+                  {% if additional_notes is defined and additional_notes %}
+                  <div class="details">
+                    <h3>Additional Notes</h3>
+                    <p>{{ additional_notes }}</p>
+                  </div>
+                  {% endif %}
+                </div>
+                <div class="footer">
+                  <p>This is an automated message from AWX. Job Template: {{ awx_job_template_name | default('Manual Execution') }}</p>
+                </div>
+              </body>
+              </html>
+            secure: always
+            subtype: html
+          delegate_to: localhost
+          run_once: true
+          when: send_notifications | bool
+
+      rescue:
+        - name: Capture failure details
+          set_fact:
+            deployment_status: "failed"
+            deployment_end_time: "{{ ansible_date_time.iso8601 }}"
+            deployment_error: "{{ ansible_failed_result.msg | default('Unknown error occurred') }}"
+            failed_task: "{{ ansible_failed_task.name | default('Unknown task') }}"
+
+        # Failure email
+        - name: Send failure email notification
+          mail:
+            host: "{{ smtp_host }}"
+            port: "{{ smtp_port }}"
+            username: "{{ smtp_username }}"
+            password: "{{ smtp_password }}"
+            from: "{{ email_from }}"
+            to: "{{ email_recipients }}"
+            cc: "{{ email_cc_recipients | default(omit) }}"
+            subject: "{{ email_subject_failure }}"
+            body: |
+              <!DOCTYPE html>
+              <html>
+              <head>
+                <style>
+                  body { font-family: Arial, sans-serif; }
+                  .header { background-color: #dc3545; color: white; padding: 20px; }
+                  .content { padding: 20px; }
+                  .error { background-color: #f8d7da; color: #721c24; padding: 15px; border: 1px solid #f5c6cb; border-radius: 5px; margin: 10px 0; }
+                  .details { background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 10px 0; }
+                  .steps { background-color: #e9ecef; padding: 15px; border-radius: 5px; margin: 10px 0; }
+                  .footer { color: #6c757d; font-size: 12px; padding: 20px; }
+                  table { width: 100%; border-collapse: collapse; }
+                  td { padding: 5px; }
+                  .label { font-weight: bold; width: 150px; }
+                </style>
+              </head>
+              <body>
+                <div class="header">
+                  <h2>✗ RDF Deployment Failed</h2>
+                </div>
+                <div class="content">
+                  <p><strong>URGENT:</strong> The RDF deployment has failed and requires immediate attention.</p>
+                  
+                  <div class="error">
+                    <h3>Error Details</h3>
+                    <table>
+                      <tr><td class="label">Failed Task:</td><td>{{ failed_task }}</td></tr>
+                      <tr><td class="label">Error Message:</td><td>{{ deployment_error }}</td></tr>
+                    </table>
+                  </div>
+                  
+                  <div class="details">
+                    <h3>Deployment Information</h3>
+                    <table>
+                      <tr><td class="label">Host:</td><td>{{ inventory_hostname }}</td></tr>
+                      <tr><td class="label">Initiated By:</td><td>{{ deployment_user }}</td></tr>
+                      <tr><td class="label">Job ID:</td><td>{{ deployment_job_id }}</td></tr>
+                      <tr><td class="label">Start Time:</td><td>{{ deployment_start_time }}</td></tr>
+                      <tr><td class="label">Failure Time:</td><td>{{ deployment_end_time }}</td></tr>
+                      <tr><td class="label">Target File:</td><td>{{ remote_target }}</td></tr>
+                      <tr><td class="label">Attachment ID:</td><td>{{ attachment_id }}</td></tr>
+                    </table>
+                  </div>
+                  
+                  {% if include_detailed_logs | bool and deployment_steps %}
+                  <div class="steps">
+                    <h3>Completed Steps Before Failure</h3>
+                    <ul>
+                      {% for step in deployment_steps %}
+                      <li>{{ step }}</li>
+                      {% endfor %}
+                      <li style="color: red;">✗ {{ failed_task }}</li>
+                    </ul>
+                  </div>
+                  {% endif %}
+                  
+                  <div class="details">
+                    <h3>Recommended Actions</h3>
+                    <ul>
+                      <li>Check the AWX job logs for detailed error information</li>
+                      <li>Verify DigitalVue API connectivity and attachment ID</li>
+                      <li>Ensure target directory permissions are correct</li>
+                      <li>Contact the DevOps team if the issue persists</li>
+                    </ul>
+                  </div>
+                </div>
+                <div class="footer">
+                  <p>This is an automated alert from AWX. Job Template: {{ awx_job_template_name | default('Manual Execution') }}</p>
+                  <p>Please check the AWX interface for complete job logs.</p>
+                </div>
+              </body>
+              </html>
+            secure: always
+            subtype: html
+          delegate_to: localhost
+          run_once: true
+          when: send_notifications | bool
+          
+        - name: Fail the playbook
+          fail:
+            msg: "RDF deployment failed: {{ deployment_error }}"
+
+      always:
+        - name: Display deployment summary
+          debug:
+            msg:
+              - "Deployment Status: {{ deployment_status | upper }}"
+              - "Email Notifications: {{ send_notifications | ternary('Sent to ' + (email_recipients | join(', ')), 'Disabled') }}"
+              - "Target: {{ remote_target }}"
+              - "Job ID: {{ deployment_job_id }}"
