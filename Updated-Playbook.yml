@@ -14,10 +14,10 @@
     backup_tag: "{{ '%d-%b-%y' | strftime(ansible_date_time.epoch | int) | lower }}"
     
     # Email configuration
-    smtp_host: "{{ smtp_server | default('smtp.gmail.com') }}"  # Can override in survey
+    smtp_host: "{{ smtp_server | default('smtp.gmail.com') }}"
     smtp_port: "{{ smtp_port_number | default(587) }}"
     smtp_username: "{{ smtp_user | default('awx-notifications@your-domain.com') }}"
-    smtp_password: "{{ vault_smtp_password }}"  # Store in AWX vault
+    smtp_password: "{{ vault_smtp_password }}"
     
     # Email recipients from survey - parse comma-separated list
     email_recipients: "{{ email_to_addresses.split(',') | map('trim') | list }}"
@@ -144,9 +144,9 @@
             deployment_status: "success"
             deployment_end_time: "{{ ansible_date_time.iso8601 }}"
 
-        # Success email
+        # Success email - FIXED WITH FQCN
         - name: Send success email notification
-          mail:
+          community.general.mail:  # <-- FIXED: Added community.general prefix
             host: "{{ smtp_host }}"
             port: "{{ smtp_port }}"
             username: "{{ smtp_username }}"
@@ -236,9 +236,9 @@
             deployment_error: "{{ ansible_failed_result.msg | default('Unknown error occurred') }}"
             failed_task: "{{ ansible_failed_task.name | default('Unknown task') }}"
 
-        # Failure email
+        # Failure email - FIXED WITH FQCN
         - name: Send failure email notification
-          mail:
+          community.general.mail:  # <-- FIXED: Added community.general prefix
             host: "{{ smtp_host }}"
             port: "{{ smtp_port }}"
             username: "{{ smtp_username }}"
