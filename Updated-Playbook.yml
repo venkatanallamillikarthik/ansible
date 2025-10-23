@@ -3,7 +3,7 @@
   gather_facts: true
   
   vars:
-    XXBDA_TOP: "XXBDA"          
+    XXINOGEN_TOP: "XXINOGEN"          
     # DigitalVue API configuration
     digitalvue_base_url: "https://digitalvuetest.osidigital.com"
     digitalvue_api_url: "{{ digitalvue_base_url }}/api/v1/attachments/{{ attachment_id }}/download/"
@@ -54,7 +54,7 @@
 
     - name: Compute base paths
       set_fact:
-        reports_dir: "{{ XXBDA_TOP }}/reports/US"
+        reports_dir: "{{ XXINOGEN_TOP }}/reports/US"
         remote_tmp_dir: "/tmp/{{ tmp_tag }}"
 
     - name: Compute target and backup paths
